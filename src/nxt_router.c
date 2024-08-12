@@ -5,6 +5,7 @@
  * Copyright (C) NGINX, Inc.
  */
 
+#include <signal.h>
 #include <nxt_router.h>
 #include <nxt_conf.h>
 #include <nxt_status.h>
@@ -5691,6 +5692,10 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
     req_rpc_data = r->timer_data;
 
     nxt_http_request_error(task, r, NXT_HTTP_SERVICE_UNAVAILABLE);
+
+    if (req_rpc_data != NULL && req_rpc_data->app_port != NULL) {
+        kill(req_rpc_data->app_port->pid, SIGKILL);
+    }
 
     nxt_request_rpc_data_unlink(task, req_rpc_data);
 }
