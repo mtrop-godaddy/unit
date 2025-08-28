@@ -20,6 +20,7 @@
 #include <nxt_unit_response.h>
 #include <nxt_router_request.h>
 #include <nxt_app_queue.h>
+#include <nxt_port.h>
 #include <nxt_port_queue.h>
 #include <nxt_http_compression.h>
 
@@ -4173,7 +4174,11 @@ nxt_router_response_ready_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg,
         nxt_request_rpc_data_unlink(task, req_rpc_data);
 
     } else {
-        if (app->timeout != 0) {
+        // The timer will normally be initialised in nxt_router_req_headers_ack_handler.
+        // If we set it here any time we receive new data from the app, it'll keep
+        // getting reset to the original app timeout and will end up acting as an
+        // idle timeout, which is not what we want.
+        if (app->timeout != 0 && r->timer.handler != nxt_router_app_timeout) {
             r->timer.handler = nxt_router_app_timeout;
             r->timer_data = req_rpc_data;
             nxt_timer_add(task->thread->engine, &r->timer, app->timeout);
@@ -5759,6 +5764,49 @@ nxt_router_prepare_msg(nxt_task_t *task, nxt_http_request_t *r,
 }
 
 
+static void send_kill_process_message(nxt_task_t *task, nxt_pid_t pid)
+{
+    size_t                 size;
+    nxt_buf_t              *b;
+    nxt_port_t             *main_port;
+    nxt_runtime_t          *rt;
+    nxt_int_t              rc;
+
+    // Allocate a buffer big enough to store the PID
+    size = sizeof(pid);
+    b = nxt_buf_mem_alloc(task->thread->engine->mem_pool, size, 0);
+
+    // I think this is just an optimisation hint for the compiler - basically telling it that we don't normally expect this to fail
+    if (nxt_slow_path(b == NULL)) {
+        nxt_log(task, NXT_LOG_WARN, "timeout(kill_process): failed to allocate message buffer (size: %zu)", size);
+        return;
+    }
+
+    // This is just a memcpy which advances the pointer to start+size (e.g. so don't need to store/manage an offset when doing multiple writes)
+    b->mem.free = nxt_cpymem(b->mem.free, &pid, size);
+
+    // We want to send a message to the main process so we need to find its RPC port, which is stored in the runtime
+    rt = task->thread->runtime;
+    main_port = rt->port_by_type[NXT_PROCESS_MAIN];
+
+    // Send the message to the main process
+    // Args are:
+    // - task: the current task
+    // - main_port: the main process's RPC port
+    // - NXT_PORT_MSG_KILL_PROCESS: the message type
+    // - -1: the file descriptor to write to (we don't want to write to a file descriptor)
+    // - 0: the stream ID (we're sending a single message so we're leaving this disabled)
+    // - 0: the reply port (we don't expect/want a reply)
+    // - b: the buffer containing the PID
+    rc = nxt_port_socket_write(task, main_port, NXT_PORT_MSG_KILL_PROCESS,
+                               -1, 0, 0, b);
+
+    if (nxt_slow_path(rc != NXT_OK)) {
+        nxt_log(task, NXT_LOG_WARN, "timeout(kill_process): failed to send message to main process");
+    }
+}
+
+
 static void
 nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
 {
@@ -5774,6 +5822,7 @@ nxt_router_app_timeout(nxt_task_t *task, void *obj, void *data)
     req_rpc_data = r->timer_data;
 
     nxt_http_request_error(task, r, NXT_HTTP_SERVICE_UNAVAILABLE);
+    send_kill_process_message(task, req_rpc_data->app_port->pid);
 
     nxt_request_rpc_data_unlink(task, req_rpc_data);
 }

@@ -53,6 +53,8 @@ static void nxt_main_port_socket_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg);
 static void nxt_main_port_socket_unlink_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg);
+static void nxt_main_port_kill_process_handler(nxt_task_t *task,
+    nxt_port_recv_msg_t *msg);
 static nxt_int_t nxt_main_listening_socket(nxt_sockaddr_t *sa,
     nxt_listening_socket_t *ls);
 static void nxt_main_port_modules_handler(nxt_task_t *task,
@@ -675,6 +677,7 @@ static nxt_port_handlers_t  nxt_main_process_port_handlers = {
     .start_process    = nxt_main_start_process_handler,
     .socket           = nxt_main_port_socket_handler,
     .socket_unlink    = nxt_main_port_socket_unlink_handler,
+    .kill_process     = nxt_main_port_kill_process_handler,
     .modules          = nxt_main_port_modules_handler,
     .conf_store       = nxt_main_port_conf_store_handler,
 #if (NXT_TLS)
@@ -1344,6 +1347,35 @@ nxt_main_port_socket_unlink_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
         break;
     }
 #endif
+}
+
+
+static void nxt_main_port_kill_process_handler(nxt_task_t *task,
+    nxt_port_recv_msg_t *msg)
+{
+    nxt_buf_t            *b;
+    nxt_pid_t            *pid;
+
+    b = msg->buf;
+    pid = (nxt_pid_t *) b->mem.pos;
+
+    nxt_log(task, NXT_LOG_INFO, "attempting to terminate process: (pid: %d)",
+            *pid);
+
+    // Check if the PID is valid and avoid killing the init process (PID 1)
+    if (nxt_fast_path(pid != NULL && *pid > 1)) {
+        // We're using Unit with the PHP runtime, which installs its own signal handlers, overriding Unit's.
+        // Unfortunately, this means that most of the time, any signals, that are sent to the application worker, simply
+        // get ignored, unless the PHP script that is currently running has registered its own signal handlers.
+        //
+        // That is why we're using SIGKILL here, as it cannot be ignored.
+        if (nxt_slow_path(kill(*pid, SIGKILL) == -1)) {
+            nxt_log(task, NXT_LOG_WARN, "failed to terminate process %d: %s",
+                    *pid, strerror(errno));
+        }
+    } else {
+        nxt_log(task, NXT_LOG_WARN, "Unable to terminate process, PID was invalid");
+    }
 }
 
 
